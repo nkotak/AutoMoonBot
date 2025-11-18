@@ -14,9 +14,10 @@ import os
 # Fix macOS issues BEFORE importing torch
 print("Initializing environment...", flush=True)
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'  # Prevent MPS errors
+os.environ['PYTORCH_MPS_ENABLED'] = '0'  # Disable MPS entirely (prevents deadlock)
 os.environ['OMP_NUM_THREADS'] = '1'  # Fix threading issues
 os.environ['MKL_NUM_THREADS'] = '1'
-print("✓ Environment configured", flush=True)
+print("✓ Environment configured (MPS disabled to prevent hangs)", flush=True)
 
 import argparse
 import json
