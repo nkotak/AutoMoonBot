@@ -54,12 +54,17 @@ This method builds a wheel file that you can install anywhere:
 cd /path/to/AutoMoonBot/automoonbot/moonrs
 
 # Build the wheel (release mode for performance)
-maturin build --release
+# IMPORTANT: Use --bindings pyo3 to avoid cffi detection issues
+maturin build --release --bindings pyo3 --features python
 
 # The wheel will be created in target/wheels/
 # Install it with pip
 pip install target/wheels/moonrs-0.1.0-*.whl
 ```
+
+**Common Issues**:
+- If maturin says "Found cffi bindings", add `--bindings pyo3` flag
+- If it uses the wrong Python version, specify with `--interpreter python3.11`
 
 **Advantages**:
 - No virtualenv required
@@ -88,7 +93,7 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
 # Navigate to moonrs and build
 cd automoonbot/moonrs
-maturin develop --release
+maturin develop --release --bindings pyo3 --features python
 
 # moonrs is now installed in the virtualenv
 ```
@@ -127,13 +132,30 @@ cargo build --release --features python
 
 ## Troubleshooting
 
+### Error: "Found cffi bindings" / "ModuleNotFoundError: No module named 'cffi'"
+
+This happens when maturin incorrectly detects cffi bindings instead of PyO3.
+
+**Solution**: Explicitly specify PyO3 bindings:
+```bash
+maturin build --release --bindings pyo3 --features python
+pip install target/wheels/moonrs-*.whl
+```
+
+**Alternative**: If you want to use cffi mode, install cffi for the Python version maturin is using:
+```bash
+# Check which Python version maturin is using (shown in error message)
+python3.13 -m pip install cffi
+# Then retry: maturin build --release
+```
+
 ### Error: "Couldn't find a virtualenv or conda environment"
 
 **Solution**: Use `maturin build` instead of `maturin develop`, or create a virtualenv first.
 
 ```bash
 # Quick fix - use build instead
-maturin build --release
+maturin build --release --bindings pyo3 --features python
 pip install target/wheels/moonrs-*.whl
 ```
 
@@ -291,11 +313,11 @@ action = actor(state_graph)
 
 | Task | Command |
 |------|---------|
-| Build wheel | `maturin build --release` |
+| Build wheel | `maturin build --release --bindings pyo3 --features python` |
 | Install wheel | `pip install target/wheels/moonrs-*.whl` |
-| Dev install | `maturin develop --release` (requires venv) |
+| Dev install | `maturin develop --release --bindings pyo3 --features python` (requires venv) |
 | Check install | `python -c "import moonrs"` |
-| Clean build | `cargo clean && maturin build --release` |
+| Clean build | `cargo clean && maturin build --release --bindings pyo3 --features python` |
 
 ---
 
