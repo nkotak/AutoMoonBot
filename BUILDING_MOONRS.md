@@ -65,6 +65,13 @@ pip install target/wheels/moonrs-0.1.0-*.whl
 **Common Issues**:
 - If maturin says "Found cffi bindings", add `--bindings pyo3` flag
 - If it uses the wrong Python version, specify with `--interpreter python3.11`
+- If wheel installation fails with "not a supported wheel on this platform", rebuild for your Python version:
+  ```bash
+  # Check your Python version
+  python --version
+  # Build for that specific version (e.g., python3.11)
+  maturin build --release --bindings pyo3 --features python --interpreter python3.11
+  ```
 
 **Advantages**:
 - No virtualenv required
@@ -157,6 +164,32 @@ python3.13 -m pip install cffi
 # Quick fix - use build instead
 maturin build --release --bindings pyo3 --features python
 pip install target/wheels/moonrs-*.whl
+```
+
+### Error: "is not a supported wheel on this platform"
+
+This happens when the wheel was built for a different Python version than the one you're using with pip.
+
+**Example**: Wheel built for Python 3.13 (`cp313`) but pip is using Python 3.11.
+
+**Solution**: Build the wheel for your specific Python version:
+```bash
+# Check which Python version pip is using
+python --version
+pip --version
+
+# Build for that specific version (e.g., 3.11)
+maturin build --release --bindings pyo3 --features python --interpreter python3.11
+
+# Or find the correct wheel in target/wheels/
+ls -lh target/wheels/
+pip install target/wheels/moonrs-0.1.0-cp311-*.whl
+```
+
+**Alternative**: Use the Python version the wheel was built for:
+```bash
+# If wheel is cp313 (Python 3.13)
+python3.13 -m pip install target/wheels/moonrs-0.1.0-cp313-*.whl
 ```
 
 ### Error: "Undefined symbols for architecture arm64"
