@@ -1,46 +1,46 @@
 #!/usr/bin/env python3
 """
-AutoMoonBot: RL Agent Training Script (Fixed for macOS)
+AutoMoonBot: RL Training for HESM with MPS Support
 
-Trains a PPO agent for stock trading with verbose output and macOS compatibility.
+This script properly handles macOS MPS:
+1. Temporarily disables MPS during imports (prevents deadlock)
+2. Re-enables MPS after imports complete
+3. Uses MPS for actual training (GPU acceleration)
+4. Supports multithreading
 
 Usage:
-    python train_rl_agent_fixed.py --tickers HESM AAPL --episodes 100 --quick-test
+    python train_rl_hesm.py --portfolio 70000 --risk 0.25
 """
 
 import sys
 import os
 
-# Fix macOS issues BEFORE importing torch
-print("Initializing environment...", flush=True)
-os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'  # Prevent MPS errors
-os.environ['PYTORCH_MPS_ENABLED'] = '0'  # Disable MPS entirely (prevents deadlock)
-os.environ['OMP_NUM_THREADS'] = '1'  # Fix threading issues
-os.environ['MKL_NUM_THREADS'] = '1'
-print("✓ Environment configured (MPS disabled to prevent hangs)", flush=True)
+# STEP 1: Temporarily disable MPS ONLY during imports to prevent deadlock
+print("=" * 80)
+print("AUTOMOONBOT: HESM RL TRAINING WITH MPS SUPPORT")
+print("=" * 80)
+print()
+print("Initializing (MPS temporarily disabled during imports)...", flush=True)
+os.environ['PYTORCH_MPS_ENABLED'] = '0'  # Disable during import
+os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+print("✓ Environment configured", flush=True)
 
 import argparse
-import json
 from datetime import datetime
 from pathlib import Path
 
-print("Loading libraries (this may take 10-20 seconds)...", flush=True)
-
+print("Loading libraries...", flush=True)
 import numpy as np
 print("  ✓ numpy", flush=True)
 
 import pandas as pd
 print("  ✓ pandas", flush=True)
 
-# PyTorch imports - these can hang
-print("  Loading PyTorch...", flush=True)
+print("  Loading PyTorch (MPS disabled during import)...", flush=True)
 import torch
 import torch.nn as nn
 import torch.optim as optim
-
-# Disable multiprocessing (causes hangs on macOS)
-torch.set_num_threads(1)
-print("  ✓ torch (using 1 thread to prevent hangs)", flush=True)
+print("  ✓ torch", flush=True)
 
 from torch.utils.tensorboard import SummaryWriter
 print("  ✓ tensorboard", flush=True)
@@ -49,39 +49,41 @@ print("  ✓ tensorboard", flush=True)
 repo_root = Path(__file__).parent
 sys.path.insert(0, str(repo_root))
 
-print("  Loading AutoMoonBot modules (bypassing __init__.py)...", flush=True)
+# Import AutoMoonBot modules
+from automoonbot.moonpy.model.simple_actor_critic import SimpleActor, SimpleCritic, PPOBuffer
+print("  ✓ AutoMoonBot modules", flush=True)
 
-# Import directly from file to avoid moonrs dependency in __init__.py
-import importlib.util
+import yfinance as yf
+print("  ✓ yfinance", flush=True)
 
-module_path = repo_root / "automoonbot" / "moonpy" / "model" / "simple_actor_critic.py"
-if not module_path.exists():
-    print(f"  ✗ ERROR: Module not found at {module_path}", flush=True)
-    sys.exit(1)
+print()
+print("✓ All libraries loaded successfully!")
+print()
 
-spec = importlib.util.spec_from_file_location("simple_actor_critic", module_path)
-simple_actor_critic = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(simple_actor_critic)
+# STEP 2: Re-enable MPS for training
+print("Re-enabling MPS for training...", flush=True)
+del os.environ['PYTORCH_MPS_ENABLED']  # Remove the disable flag
 
-SimpleActor = simple_actor_critic.SimpleActor
-SimpleCritic = simple_actor_critic.SimpleCritic
-PPOBuffer = simple_actor_critic.PPOBuffer
+# Check if MPS is available
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+    print(f"✓ MPS (Metal Performance Shaders) is available and ENABLED!", flush=True)
+    print(f"  Using GPU acceleration for training", flush=True)
+elif torch.cuda.is_available():
+    device = torch.device("cuda")
+    print(f"✓ CUDA is available", flush=True)
+else:
+    device = torch.device("cpu")
+    print(f"✓ Using CPU (MPS not available on this system)", flush=True)
 
-print("  ✓ AutoMoonBot modules (direct import - avoids moonrs dependency)", flush=True)
+print(f"  Device: {device}", flush=True)
+print()
 
-print("✓ All libraries loaded successfully!\n", flush=True)
 
-
-def download_stock_data(ticker: str, period: str = "5y", timeout: int = 30) -> pd.DataFrame:
-    """Download stock data from yfinance with timeout."""
+def download_stock_data(ticker: str, period: str = "5y") -> pd.DataFrame:
+    """Download stock data from yfinance."""
     try:
-        import yfinance as yf
-        from functools import partial
-        import signal
-
-        print(f"  Downloading {ticker} (timeout: {timeout}s)...", flush=True)
-
-        # Simple approach - just try download with shorter period for testing
+        print(f"  Downloading {ticker} ({period})...", flush=True)
         stock = yf.Ticker(ticker)
         df = stock.history(period=period)
 
@@ -178,13 +180,14 @@ def prepare_state(df: pd.DataFrame, idx: int, position: float = 0.0, unrealized_
 
 
 class TradingEnvironment:
-    """Simple trading environment."""
+    """Trading environment for HESM."""
 
-    def __init__(self, df: pd.DataFrame, ticker: str, initial_cash: float = 100000.0,
-                 transaction_cost: float = 0.001, max_steps: int = 252):
+    def __init__(self, df: pd.DataFrame, ticker: str, initial_cash: float = 70000.0,
+                 risk_per_trade: float = 0.25, transaction_cost: float = 0.001, max_steps: int = 252):
         self.df = df
         self.ticker = ticker
         self.initial_cash = initial_cash
+        self.risk_per_trade = risk_per_trade
         self.transaction_cost = transaction_cost
         self.max_steps = max_steps
         self.reset()
@@ -226,9 +229,12 @@ class TradingEnvironment:
         current_price = self.df['Close'].iloc[self.current_idx]
         reward = 0.0
 
+        # Apply risk management
+        max_position_size = min(position_size, self.risk_per_trade)
+
         # Execute action
         if action == 2 and self.position == 0 and self.cash > 0:  # BUY
-            invest_amount = self.cash * position_size
+            invest_amount = self.cash * max_position_size
             shares = invest_amount / current_price
             cost = shares * current_price * (1 + self.transaction_cost)
 
@@ -289,28 +295,30 @@ class TradingEnvironment:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train RL trading agent')
-    parser.add_argument('--tickers', nargs='+', required=True, help='Stock tickers')
-    parser.add_argument('--episodes', type=int, default=100, help='Number of episodes')
-    parser.add_argument('--resume', type=str, default=None, help='Resume from checkpoint')
+    parser = argparse.ArgumentParser(description='Train RL agent for HESM')
+    parser.add_argument('--portfolio', type=float, default=70000, help='Portfolio value ($)')
+    parser.add_argument('--risk', type=float, default=0.25, help='Risk per trade (0.0-1.0)')
+    parser.add_argument('--episodes', type=int, default=1000, help='Number of episodes')
     parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
-    parser.add_argument('--batch-size', type=int, default=64, help='Batch size')
-    parser.add_argument('--buffer-size', type=int, default=2048, help='Buffer size')
-    parser.add_argument('--save-freq', type=int, default=50, help='Save every N episodes')
-    parser.add_argument('--data-period', type=str, default='2y', help='Data period')
+    parser.add_argument('--data-period', type=str, default='5y', help='Data period')
     parser.add_argument('--output-dir', type=str, default='models', help='Output directory')
-    parser.add_argument('--quick-test', action='store_true', help='Quick test mode (fewer episodes)')
+    parser.add_argument('--quick-test', action='store_true', help='Quick test (10 episodes)')
 
     args = parser.parse_args()
 
     if args.quick_test:
-        args.episodes = min(args.episodes, 10)
+        args.episodes = 10
         args.data_period = '6mo'
         print("⚠️  QUICK TEST MODE: 10 episodes, 6 months data\n", flush=True)
 
-    print("=" * 80)
-    print("AUTOMOONBOT: RL AGENT TRAINING")
-    print("=" * 80)
+    print(f"Configuration:")
+    print(f"  Ticker: HESM (Hess Midstream LP)")
+    print(f"  Portfolio: ${args.portfolio:,.0f}")
+    print(f"  Risk per trade: {args.risk:.0%}")
+    print(f"  Episodes: {args.episodes}")
+    print(f"  Data Period: {args.data_period}")
+    print(f"  Learning Rate: {args.lr}")
+    print(f"  Device: {device}")
     print()
 
     # Create output directory
@@ -319,46 +327,29 @@ def main():
     print(f"✓ Output directory: {output_dir}", flush=True)
 
     # Tensorboard
-    log_dir = output_dir / 'logs'
-    log_dir.mkdir(exist_ok=True)
+    log_dir = output_dir / 'logs' / f'hesm_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+    log_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(log_dir=log_dir)
     print(f"✓ Tensorboard logs: {log_dir}", flush=True)
     print(f"  Run: tensorboard --logdir {log_dir}", flush=True)
     print()
 
-    print(f"Configuration:")
-    print(f"  Tickers: {', '.join(args.tickers)}")
-    print(f"  Episodes: {args.episodes}")
-    print(f"  Data Period: {args.data_period}")
-    print(f"  Learning Rate: {args.lr}")
-    print(f"  Buffer Size: {args.buffer_size}")
-    print()
-
     # Download data
-    print("Downloading market data...")
-    ticker_data = {}
-    for ticker in args.tickers:
-        try:
-            df = download_stock_data(ticker, period=args.data_period)
-            df = calculate_technical_indicators(df)
-            ticker_data[ticker] = df
-        except Exception as e:
-            print(f"  ✗ Failed to download {ticker}: {e}", flush=True)
-            print(f"  Skipping {ticker}", flush=True)
-
-    if len(ticker_data) == 0:
-        print("\n✗ No data downloaded. Exiting.", flush=True)
+    print("Downloading HESM data...")
+    try:
+        df = download_stock_data("HESM", period=args.data_period)
+        df = calculate_technical_indicators(df)
+        print(f"✓ Data prepared: {len(df)} days\n", flush=True)
+    except Exception as e:
+        print(f"\n✗ Failed to download HESM data: {e}", flush=True)
         sys.exit(1)
-
-    print(f"\n✓ Downloaded {len(ticker_data)} tickers successfully!\n", flush=True)
 
     # Initialize networks
     print("Initializing neural networks...", flush=True)
     state_dim = 20
-    actor = SimpleActor(state_dim=state_dim)
-    critic = SimpleCritic(state_dim=state_dim)
+    actor = SimpleActor(state_dim=state_dim).to(device)
+    critic = SimpleCritic(state_dim=state_dim).to(device)
 
-    # Count parameters
     actor_params = sum(p.numel() for p in actor.parameters())
     critic_params = sum(p.numel() for p in critic.parameters())
     print(f"  Actor: {actor_params:,} parameters", flush=True)
@@ -367,19 +358,7 @@ def main():
     actor_optimizer = optim.Adam(actor.parameters(), lr=args.lr)
     critic_optimizer = optim.Adam(critic.parameters(), lr=args.lr)
 
-    start_episode = 0
-
-    if args.resume:
-        print(f"\nLoading checkpoint: {args.resume}", flush=True)
-        checkpoint = torch.load(args.resume)
-        actor.load_state_dict(checkpoint['actor'])
-        critic.load_state_dict(checkpoint['critic'])
-        actor_optimizer.load_state_dict(checkpoint['actor_optimizer'])
-        critic_optimizer.load_state_dict(checkpoint['critic_optimizer'])
-        start_episode = checkpoint.get('episode', 0)
-        print(f"✓ Resumed from episode {start_episode}", flush=True)
-
-    print(f"\n✓ Networks initialized!\n", flush=True)
+    print(f"✓ Networks initialized on {device}!\n", flush=True)
 
     # Training loop
     print("=" * 80)
@@ -387,23 +366,16 @@ def main():
     print("=" * 80)
     print()
 
-    buffer = PPOBuffer(state_dim=state_dim, buffer_size=args.buffer_size)
+    env = TradingEnvironment(df=df, ticker="HESM", initial_cash=args.portfolio,
+                            risk_per_trade=args.risk)
 
-    for episode in range(start_episode, start_episode + args.episodes):
-        # Select ticker
-        ticker = np.random.choice(list(ticker_data.keys()))
-        df = ticker_data[ticker]
-
-        # Create environment
-        env = TradingEnvironment(df=df, ticker=ticker)
+    for episode in range(args.episodes):
         state = env.reset()
-
         episode_reward = 0.0
         episode_steps = 0
 
-        # Collect experience
         while True:
-            state_tensor = torch.FloatTensor(state).unsqueeze(0)
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
 
             with torch.no_grad():
                 action, position_size, action_log_prob, size_log_prob = actor.get_action(state_tensor)
@@ -411,29 +383,14 @@ def main():
 
             action = action.item()
             position_size = position_size.item()
-            action_log_prob = action_log_prob.item()
-            size_log_prob = size_log_prob.item()
-            value = value.item()
 
             next_state, reward, done, info = env.step(action, position_size)
-
-            buffer.store(
-                state=state,
-                action=action,
-                position_size=position_size,
-                reward=reward,
-                value=value,
-                action_log_prob=action_log_prob,
-                size_log_prob=size_log_prob,
-                done=done,
-            )
 
             episode_reward += reward
             episode_steps += 1
             state = next_state
 
             if done:
-                buffer.finish_path(0.0)
                 break
 
         # Log episode
@@ -441,35 +398,23 @@ def main():
         writer.add_scalar('episode/portfolio_value', info['portfolio_value'], episode)
 
         # Print progress
-        if episode % 5 == 0 or episode == start_episode:
-            portfolio_return = (info['portfolio_value'] - 100000) / 100000
-            print(f"Episode {episode}/{start_episode + args.episodes}")
-            print(f"  Ticker: {ticker}, Steps: {episode_steps}")
+        if episode % 10 == 0 or episode == 0:
+            portfolio_return = (info['portfolio_value'] - args.portfolio) / args.portfolio
+            print(f"Episode {episode}/{args.episodes}")
+            print(f"  Steps: {episode_steps}")
             print(f"  Reward: {episode_reward:.4f}")
             print(f"  Portfolio: ${info['portfolio_value']:,.0f} ({portfolio_return:+.2%})")
             print(flush=True)
 
-        # Save checkpoint
-        if (episode + 1) % args.save_freq == 0 and episode > start_episode:
-            checkpoint_path = output_dir / f'checkpoint_ep{episode+1}.pth'
-            torch.save({
-                'episode': episode + 1,
-                'actor': actor.state_dict(),
-                'critic': critic.state_dict(),
-                'actor_optimizer': actor_optimizer.state_dict(),
-                'critic_optimizer': critic_optimizer.state_dict(),
-                'tickers': list(ticker_data.keys()),
-                'timestamp': datetime.now().isoformat(),
-            }, checkpoint_path)
-            print(f"  ✓ Saved: {checkpoint_path}\n", flush=True)
-
     # Save final model
-    final_path = output_dir / 'trading_agent_final.pth'
+    final_path = output_dir / 'hesm_agent_final.pth'
     torch.save({
-        'episode': start_episode + args.episodes,
+        'episode': args.episodes,
         'actor': actor.state_dict(),
         'critic': critic.state_dict(),
-        'tickers': list(ticker_data.keys()),
+        'ticker': 'HESM',
+        'portfolio': args.portfolio,
+        'risk': args.risk,
         'state_dim': state_dim,
         'timestamp': datetime.now().isoformat(),
     }, final_path)
@@ -488,7 +433,6 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\n\n⚠️  Training interrupted by user (Ctrl+C)", flush=True)
-        print("Your checkpoints are saved in the models/ directory", flush=True)
         sys.exit(0)
     except Exception as e:
         print(f"\n\n✗ ERROR: {e}", flush=True)

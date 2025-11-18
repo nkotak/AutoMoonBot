@@ -4,7 +4,15 @@ Diagnostic version to find where it's hanging
 """
 
 import sys
-print("1. Python started", flush=True)
+import os
+
+# CRITICAL: Set these BEFORE importing torch to prevent MPS deadlock on macOS
+os.environ['PYTORCH_MPS_ENABLED'] = '0'  # Disable MPS entirely
+os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+
+print("1. Python started (MPS disabled)", flush=True)
 
 from pathlib import Path
 print("2. Imported pathlib", flush=True)

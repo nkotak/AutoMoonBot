@@ -15,12 +15,12 @@ Usage:
 import sys
 import os
 
-# Fix macOS threading issues BEFORE importing torch
+# Prevent MPS initialization during import (allows it later for training)
 print("Initializing environment...", flush=True)
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
-os.environ['OMP_NUM_THREADS'] = '1'
-os.environ['MKL_NUM_THREADS'] = '1'
-print("✓ Environment configured for macOS", flush=True)
+# Don't set OMP_NUM_THREADS - allow multithreading
+# Don't disable MPS - we want to use it
+print("✓ Environment configured for macOS (MPS will initialize after imports)", flush=True)
 
 import argparse
 from datetime import datetime
