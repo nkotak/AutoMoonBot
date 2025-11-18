@@ -15,12 +15,11 @@ Usage:
 import sys
 import os
 
-# Prevent MPS initialization during import (allows it later for training)
+# STEP 1: Disable MPS during imports to prevent mutex deadlock
 print("Initializing environment...", flush=True)
+os.environ['PYTORCH_MPS_ENABLED'] = '0'  # Temporarily disable MPS
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
-# Don't set OMP_NUM_THREADS - allow multithreading
-# Don't disable MPS - we want to use it
-print("✓ Environment configured for macOS (MPS will initialize after imports)", flush=True)
+print("✓ MPS temporarily disabled during imports (prevents deadlock)", flush=True)
 
 import argparse
 from datetime import datetime
@@ -36,8 +35,7 @@ print("  ✓ pandas", flush=True)
 import torch
 import torch.nn as nn
 import torch.optim as optim
-torch.set_num_threads(1)
-print("  ✓ torch (single-threaded mode)", flush=True)
+print("  ✓ torch", flush=True)
 
 from torch.utils.tensorboard import SummaryWriter
 print("  ✓ tensorboard", flush=True)
@@ -46,7 +44,22 @@ print("  ✓ tensorboard", flush=True)
 from automoonbot.moonpy.model.simple_actor_critic import SimpleActor, SimpleCritic, PPOBuffer
 print("  ✓ AutoMoonBot modules", flush=True)
 
-print("✓ All libraries loaded!\n", flush=True)
+# STEP 2: Re-enable MPS after all imports complete
+print("\nRe-enabling MPS for training...", flush=True)
+del os.environ['PYTORCH_MPS_ENABLED']  # Remove disable flag
+
+# Check device availability
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+    print("✓ Using MPS (GPU acceleration enabled!)", flush=True)
+elif torch.cuda.is_available():
+    device = torch.device("cuda")
+    print("✓ Using CUDA", flush=True)
+else:
+    device = torch.device("cpu")
+    print("✓ Using CPU", flush=True)
+
+print(f"  Device: {device}\n", flush=True)
 
 
 def download_stock_data(ticker: str, period: str = "5y") -> pd.DataFrame:
@@ -277,13 +290,14 @@ def main():
     print(f"\n✓ Downloaded {len(ticker_data)} tickers!\n", flush=True)
 
     print("Initializing networks...", flush=True)
-    actor = SimpleActor(state_dim=20)
-    critic = SimpleCritic(state_dim=20)
+    actor = SimpleActor(state_dim=20).to(device)
+    critic = SimpleCritic(state_dim=20).to(device)
 
     actor_params = sum(p.numel() for p in actor.parameters())
     critic_params = sum(p.numel() for p in critic.parameters())
     print(f"  Actor: {actor_params:,} parameters", flush=True)
     print(f"  Critic: {critic_params:,} parameters", flush=True)
+    print(f"  Models moved to: {device}", flush=True)
 
     actor_optimizer = optim.Adam(actor.parameters(), lr=args.lr)
     critic_optimizer = optim.Adam(critic.parameters(), lr=args.lr)
@@ -318,7 +332,7 @@ def main():
         episode_steps = 0
 
         while True:
-            state_tensor = torch.FloatTensor(state).unsqueeze(0)
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
 
             with torch.no_grad():
                 action, position_size, action_log_prob, size_log_prob = actor.get_action(state_tensor)
