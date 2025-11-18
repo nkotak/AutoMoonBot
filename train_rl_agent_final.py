@@ -20,13 +20,18 @@ import sys
 import os
 
 # ============================================================================
-# STEP 1: Fix macOS MPS Deadlock
+# STEP 1: AGGRESSIVE MPS Deadlock Prevention
 # ============================================================================
-# Temporarily disable MPS BEFORE any torch imports to prevent mutex deadlock
+# Set EVERY possible environment variable to prevent MPS initialization
 print("Initializing environment...", flush=True)
 os.environ['PYTORCH_MPS_ENABLED'] = '0'
-os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
-print("✓ MPS temporarily disabled during imports", flush=True)
+os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '0'  # Don't fall back either
+os.environ['DISABLE_MPS'] = '1'
+os.environ['PYTORCH_DISABLE_MPS'] = '1'
+# Also prevent multithreading during import
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+print("✓ MPS aggressively disabled during imports", flush=True)
 
 import argparse
 from datetime import datetime
@@ -39,10 +44,13 @@ print("  ✓ numpy", flush=True)
 import pandas as pd
 print("  ✓ pandas", flush=True)
 
+# Import torch and IMMEDIATELY force CPU mode before it can initialize MPS
 import torch
+torch.set_default_device('cpu')  # Force CPU mode
+print("  ✓ torch (forced to CPU during imports)", flush=True)
+
 import torch.nn as nn
 import torch.optim as optim
-print("  ✓ torch", flush=True)
 
 from torch.utils.tensorboard import SummaryWriter
 print("  ✓ tensorboard", flush=True)
@@ -55,6 +63,13 @@ print("  ✓ AutoMoonBot modules", flush=True)
 # ============================================================================
 print("\nRe-enabling MPS for training...", flush=True)
 del os.environ['PYTORCH_MPS_ENABLED']
+del os.environ['PYTORCH_ENABLE_MPS_FALLBACK']
+del os.environ['DISABLE_MPS']
+del os.environ['PYTORCH_DISABLE_MPS']
+
+# Reset threading
+del os.environ['OMP_NUM_THREADS']
+del os.environ['MKL_NUM_THREADS']
 
 # Detect best available device
 if torch.backends.mps.is_available():
