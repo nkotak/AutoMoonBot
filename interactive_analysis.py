@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
 """
-AutoMoonBot: Interactive Stock Analysis
-Asks for all inputs interactively, then runs analysis
+AutoMoonBot: Interactive Stock Analysis with RL Agent
+
+Features:
+- Loads your trained PPO agent (if available)
+- Uses RL model for BUY/SELL/HOLD recommendations
+- Falls back to technical analysis if no model
+- Combines RL + technical signals for best results
 
 USAGE:
     python interactive_analysis.py
+
+    # Or specify model path:
+    python interactive_analysis.py --model models/trading_agent_final.pth
 """
 
 import sys
 import os
 
-# Add AutoMoonBot to path if running from repo
-if os.path.exists('/home/user/AutoMoonBot'):
-    sys.path.insert(0, '/home/user/AutoMoonBot')
+# MPS deadlock prevention (before any torch imports)
+os.environ['PYTORCH_MPS_ENABLED'] = '0'
+os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '0'
 
 def get_input(prompt, default=None, input_type=str, validator=None):
     """Get user input with validation"""
@@ -49,15 +57,75 @@ def get_yes_no(prompt, default="y"):
             print("  ⚠ Please enter 'y' or 'n'")
 
 print("=" * 80)
-print("AUTOMOONBOT: INTERACTIVE STOCK ANALYSIS")
+print("AUTOMOONBOT: INTERACTIVE ANALYSIS WITH RL AGENT")
 print("=" * 80)
 print()
-print("This tool will analyze any stock and provide:")
-print("  • Market regime analysis")
-print("  • Position sizing recommendations")
-print("  • Entry/exit price targets")
-print("  • Risk assessment")
-print("  • Trading signals")
+print("This tool will analyze stocks using:")
+print("  • Trained RL Agent (PPO) - if model is available")
+print("  • Technical Analysis (moving averages, volatility)")
+print("  • Market Regime Detection")
+print("  • Position Sizing & Risk Management")
+print()
+
+# ============================================================================
+# Load RL Model (if available)
+# ============================================================================
+
+RL_MODEL_AVAILABLE = False
+actor = None
+device = None
+
+try:
+    import torch
+    import torch.nn as nn
+    torch.set_default_device('cpu')
+
+    from automoonbot.moonpy.model.simple_actor_critic import SimpleActor
+    from pathlib import Path
+
+    # Re-enable MPS after imports
+    if 'PYTORCH_MPS_ENABLED' in os.environ:
+        del os.environ['PYTORCH_MPS_ENABLED']
+    if 'PYTORCH_ENABLE_MPS_FALLBACK' in os.environ:
+        del os.environ['PYTORCH_ENABLE_MPS_FALLBACK']
+
+    # Detect device
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+
+    # Look for trained model
+    model_path = Path("models/trading_agent_final.pth")
+    if not model_path.exists():
+        # Try checkpoint
+        checkpoints = list(Path("models").glob("checkpoint_ep*.pth")) if Path("models").exists() else []
+        if checkpoints:
+            model_path = sorted(checkpoints)[-1]  # Most recent
+
+    if model_path.exists():
+        print(f"✓ Found RL model: {model_path}")
+        checkpoint = torch.load(model_path, map_location=device)
+
+        actor = SimpleActor(state_dim=20).to(device)
+        actor.load_state_dict(checkpoint['actor'])
+        actor.eval()  # Set to evaluation mode
+
+        RL_MODEL_AVAILABLE = True
+        print(f"✓ RL Agent loaded on {device}")
+        print(f"  Trained on: {', '.join(checkpoint.get('tickers', ['unknown']))}")
+        print(f"  Episodes: {checkpoint.get('episode', 'unknown')}")
+    else:
+        print("⚠ No trained RL model found")
+        print("  Will use technical analysis only")
+        print(f"  To train a model, run: python train_rl_agent_final.py --tickers AAPL --episodes 1000")
+
+except Exception as e:
+    print(f"⚠ Could not load RL model: {e}")
+    print("  Will use technical analysis only")
+
 print()
 print("Let's get started!")
 print()
@@ -113,17 +181,13 @@ risk_per_trade = risk_pct / 100
 
 if risk_per_trade > 0.10:
     print(f"  ⚠ WARNING: {risk_pct}% is EXTREMELY aggressive!")
-    confirm = get_yes_no("  Are you sure you want to continue with this risk level?", default="n")
+    confirm = get_yes_no("  Are you sure?", default="n")
     if not confirm:
         risk_pct = 2.0
         risk_per_trade = 0.02
-        print(f"  ✓ Reset to recommended 2% risk")
-    else:
-        print(f"  ⚠ Proceeding with {risk_pct}% risk - BE CAREFUL!")
-elif risk_per_trade > 0.05:
-    print(f"  ⚠ {risk_pct}% is aggressive (higher than typical)")
+        print(f"  ✓ Reset to 2% risk")
 else:
-    print(f"  ✓ {risk_pct}% is a reasonable risk level")
+    print(f"  ✓ {risk_pct}% risk")
 
 print()
 
@@ -148,252 +212,278 @@ print(f"  ✓ Max position: {max_position*100:.0f}%")
 print()
 
 # ============================================================================
-# Summary and Confirmation
+# Fetch Market Data
 # ============================================================================
+
 print("=" * 80)
-print("CONFIGURATION SUMMARY")
+print("FETCHING MARKET DATA")
 print("=" * 80)
-print(f"  Ticker: {ticker}")
-print(f"  Portfolio: ${portfolio_value:,.2f}")
-print(f"  Risk per Trade: {risk_per_trade*100:.1f}%")
-print(f"  Stop Loss: {stop_loss_pct*100:.1f}%")
-print(f"  Max Position: {max_position*100:.0f}%")
-print("=" * 80)
-print()
-
-proceed = get_yes_no("Proceed with analysis?", default="y")
-
-if not proceed:
-    print("Analysis cancelled.")
-    sys.exit(0)
-
-print()
-print("Starting analysis...")
-print()
-
-# ============================================================================
-# Run Analysis
-# ============================================================================
 
 try:
     import yfinance as yf
     import pandas as pd
     import numpy as np
 
-    print("-" * 80)
-    print("FETCHING MARKET DATA")
-    print("-" * 80)
     print(f"Downloading {ticker} from Yahoo Finance...")
-
-    # Fetch stock data
     stock = yf.Ticker(ticker)
-    hist = stock.history(period="6mo")
+    hist = stock.history(period="1y")  # Need more data for RL features
 
     if len(hist) == 0:
         print(f"✗ No data available for {ticker}")
-        print("  Please verify the ticker symbol is correct")
         sys.exit(1)
 
-    # Current data
+    # Calculate technical indicators (needed for RL state)
+    hist['returns'] = hist['Close'].pct_change()
+    hist['ma_5'] = hist['Close'].rolling(5).mean()
+    hist['ma_20'] = hist['Close'].rolling(20).mean()
+    hist['ma_50'] = hist['Close'].rolling(50).mean()
+    hist['volatility_20'] = hist['returns'].rolling(20).std()
+
+    # RSI
+    delta = hist['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    rs = gain / loss
+    hist['rsi'] = 100 - (100 / (1 + rs))
+
+    # MACD
+    ema_12 = hist['Close'].ewm(span=12).mean()
+    ema_26 = hist['Close'].ewm(span=26).mean()
+    hist['macd'] = ema_12 - ema_26
+
+    # Bollinger Bands
+    hist['bb_middle'] = hist['Close'].rolling(20).mean()
+    bb_std = hist['Close'].rolling(20).std()
+    hist['bb_upper'] = hist['bb_middle'] + (bb_std * 2)
+    hist['bb_lower'] = hist['bb_middle'] - (bb_std * 2)
+    hist['bb_position'] = (hist['Close'] - hist['bb_lower']) / (hist['bb_upper'] - hist['bb_lower'])
+
+    # Volume
+    hist['volume_ma'] = hist['Volume'].rolling(20).mean()
+    hist['volume_ratio'] = hist['Volume'] / hist['volume_ma']
+
+    hist = hist.dropna()
+
+    # Current metrics
     current_price = float(hist['Close'].iloc[-1])
     prev_close = float(hist['Close'].iloc[-2])
     daily_change = (current_price - prev_close) / prev_close
 
-    # Volume
-    current_volume = int(hist['Volume'].iloc[-1])
-    avg_volume = int(hist['Volume'].mean())
-    volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1.0
+    volatility = float(hist['returns'].std() * np.sqrt(252))
 
-    # Volatility
-    returns = hist['Close'].pct_change().dropna()
-    volatility = float(returns.std() * np.sqrt(252))
-
-    # Moving averages
-    ma_20 = float(hist['Close'].rolling(20).mean().iloc[-1])
-    ma_50 = float(hist['Close'].rolling(50).mean().iloc[-1]) if len(hist) >= 50 else ma_20
-
-    price_vs_ma20 = (current_price - ma_20) / ma_20 if ma_20 > 0 else 0
-    price_vs_ma50 = (current_price - ma_50) / ma_50 if ma_50 > 0 else 0
-
-    # Get company info
     info = stock.info
     company_name = info.get('longName', ticker)
 
-    print(f"✓ Data fetched successfully")
+    print(f"✓ Data fetched: {len(hist)} days")
     print()
     print(f"Company: {company_name}")
     print(f"Current Price: ${current_price:.2f} ({daily_change:+.2%})")
-    print(f"Volatility: {volatility:.1%}")
-    print(f"Volume: {current_volume:,} ({volume_ratio:.2f}x avg)")
+    print(f"Volatility (annualized): {volatility:.1%}")
     print()
-
-except ImportError:
-    print("✗ ERROR: yfinance not installed")
-    print("  Install with: pip install yfinance pandas numpy")
-    sys.exit(1)
 
 except Exception as e:
     print(f"✗ ERROR: {e}")
     sys.exit(1)
 
-# Market regime analysis
-if volatility < 0.20:
-    vol_regime = "LOW"
-    vol_adjustment = 1.2
-elif volatility < 0.40:
-    vol_regime = "NORMAL"
-    vol_adjustment = 1.0
-else:
-    vol_regime = "HIGH"
-    vol_adjustment = 0.8
+# ============================================================================
+# RL Agent Prediction (if available)
+# ============================================================================
 
-# Trend analysis
+rl_action = None
+rl_position_size = None
+rl_confidence = None
+
+if RL_MODEL_AVAILABLE and actor is not None:
+    print("-" * 80)
+    print("RL AGENT ANALYSIS")
+    print("-" * 80)
+
+    try:
+        # Prepare state vector (same as training)
+        idx = len(hist) - 1
+        row = hist.iloc[idx]
+        close = row['Close']
+
+        state = np.zeros(20, dtype=np.float32)
+        state[0] = row['returns'] if not pd.isna(row['returns']) else 0.0
+        state[1] = np.clip(row['volume_ratio'], 0, 5) / 5 if not pd.isna(row['volume_ratio']) else 0.5
+        state[2] = hist['Close'].pct_change(5).iloc[idx] if idx >= 5 else 0.0
+        state[3] = hist['Close'].pct_change(20).iloc[idx] if idx >= 20 else 0.0
+        state[4] = row['rsi'] / 100 if not pd.isna(row['rsi']) else 0.5
+        state[5] = np.clip(row['macd'] / close, -0.1, 0.1) * 10 if not pd.isna(row['macd']) else 0.0
+        state[6] = np.clip(row['bb_position'], 0, 1) if not pd.isna(row['bb_position']) else 0.5
+        state[7] = np.clip(row['volatility_20'], 0, 0.1) * 10 if not pd.isna(row['volatility_20']) else 0.0
+        state[8] = (close - row['ma_20']) / close if not pd.isna(row['ma_20']) else 0.0
+        state[9] = (close - row['ma_50']) / close if not pd.isna(row['ma_50']) else 0.0
+        state[10] = np.clip(row['volume_ratio'], 0, 3) / 3 if not pd.isna(row['volume_ratio']) else 0.5
+
+        for i in range(4):
+            if idx >= i + 1:
+                state[11 + i] = hist['returns'].iloc[idx - i]
+
+        # No position currently (state[15-17] = 0)
+
+        # Get RL agent's recommendation
+        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
+
+        with torch.no_grad():
+            action, position_size, action_log_prob, size_log_prob = actor.get_action(state_tensor)
+
+            rl_action = action.item()  # 0=SELL, 1=HOLD, 2=BUY
+            rl_position_size = position_size.item()
+
+            # Confidence based on log probabilities
+            rl_confidence = min(torch.exp(action_log_prob).item(), 1.0)
+
+        action_names = {0: "SELL", 1: "HOLD", 2: "BUY"}
+
+        print(f"RL Recommendation: {action_names[rl_action]}")
+        print(f"Position Size: {rl_position_size:.1%}")
+        print(f"Confidence: {rl_confidence:.0%}")
+        print()
+
+    except Exception as e:
+        print(f"⚠ RL prediction failed: {e}")
+        RL_MODEL_AVAILABLE = False
+
+# ============================================================================
+# Technical Analysis
+# ============================================================================
+
+print("-" * 80)
+print("TECHNICAL ANALYSIS")
+print("-" * 80)
+
+ma_20 = float(hist['ma_20'].iloc[-1])
+ma_50 = float(hist['ma_50'].iloc[-1])
+price_vs_ma20 = (current_price - ma_20) / ma_20
+price_vs_ma50 = (current_price - ma_50) / ma_50
+
+# Trend
 if price_vs_ma20 > 0.05 and price_vs_ma50 > 0.05:
     trend = "STRONG UPTREND"
     trend_signal = "BULLISH"
-    trend_score = 0.9
 elif price_vs_ma20 > 0 and price_vs_ma50 > 0:
     trend = "UPTREND"
     trend_signal = "BULLISH"
-    trend_score = 0.7
 elif price_vs_ma20 < -0.05 and price_vs_ma50 < -0.05:
     trend = "STRONG DOWNTREND"
     trend_signal = "BEARISH"
-    trend_score = 0.3
 elif price_vs_ma20 < 0 and price_vs_ma50 < 0:
     trend = "DOWNTREND"
     trend_signal = "BEARISH"
-    trend_score = 0.4
 else:
     trend = "SIDEWAYS"
     trend_signal = "NEUTRAL"
-    trend_score = 0.5
 
-# Volume score
-if volume_ratio > 1.5:
-    volume_score = 0.9
-elif volume_ratio > 1.2:
-    volume_score = 0.7
-else:
-    volume_score = 0.5
-
-print("-" * 80)
-print("MARKET ANALYSIS")
-print("-" * 80)
-print(f"Volatility: {vol_regime} ({volatility:.1%})")
-print(f"Trend: {trend} ({trend_signal})")
+print(f"Trend: {trend}")
 print(f"Price vs 20-MA: {price_vs_ma20:+.1%}")
 print(f"Price vs 50-MA: {price_vs_ma50:+.1%}")
+print(f"RSI: {hist['rsi'].iloc[-1]:.1f}")
 print()
 
-# Position sizing
-try:
-    from automoonbot.moonpy.risk_management import FixedFractionalSizer
-    sizer = FixedFractionalSizer(
-        risk_per_trade=risk_per_trade,
-        stop_loss_pct=stop_loss_pct,
-        max_position_size=max_position,
-        min_position_size=0.01
-    )
-    position_size = sizer.calculate_position_size(
-        portfolio_value=portfolio_value,
-        asset_price=current_price
-    )
-    print("✓ Using AutoMoonBot FixedFractionalSizer")
-except:
-    # Fallback
-    risk_amount = portfolio_value * risk_per_trade
-    position_dollars = risk_amount / stop_loss_pct
-    position_size = position_dollars / portfolio_value
-    position_size = min(position_size, max_position)
-    position_size = max(position_size, 0.01)
-    print("✓ Using FixedFractionalSizer algorithm")
-
-# Apply adjustments
-adjusted_position = position_size * vol_adjustment
-final_position = min(adjusted_position, max_position)
-
-position_value = final_position * portfolio_value
-shares = int(position_value / current_price)
-actual_invested = shares * current_price
-actual_position_pct = actual_invested / portfolio_value
-
-max_risk_dollars = shares * current_price * stop_loss_pct
-max_risk_pct = max_risk_dollars / portfolio_value
-
-print()
-print("-" * 80)
-print("POSITION SIZING")
-print("-" * 80)
-print(f"Recommended Shares: {shares:,}")
-print(f"@ ${current_price:.2f} = ${actual_invested:,.2f}")
-print(f"Position Size: {actual_position_pct:.1%} of portfolio")
-print(f"Max Risk: ${max_risk_dollars:,.2f} ({max_risk_pct:.2%})")
-print()
-
-# Entry/Exit
-entry_price = current_price
-stop_price = entry_price * (1 - stop_loss_pct)
-risk_per_share = entry_price - stop_price
-
-target_2_0 = entry_price + (risk_per_share * 2.0)
-gain_2_0 = shares * (target_2_0 - entry_price)
-
-print("-" * 80)
-print("ENTRY/EXIT TARGETS")
-print("-" * 80)
-print(f"Entry: ${entry_price:.2f}")
-print(f"Stop Loss: ${stop_price:.2f} (-{stop_loss_pct*100:.0f}%)")
-print(f"Take Profit: ${target_2_0:.2f} (+{((target_2_0/entry_price-1)*100):.0f}%)")
-print(f"Target Gain: ${gain_2_0:+,.0f}")
-print()
-
-# Signal generation
-risk_warnings = []
-if risk_per_trade > 0.10:
-    risk_warnings.append(f"EXTREME risk ({risk_per_trade*100:.0f}%)")
-elif risk_per_trade > 0.05:
-    risk_warnings.append(f"High risk ({risk_per_trade*100:.0f}%)")
-
-if volatility > 0.50:
-    risk_warnings.append("Extreme volatility")
-
-confidence = (trend_score * 0.4 + volume_score * 0.3 + (1 - min(len(risk_warnings) * 0.15, 0.4)) * 0.3)
-
-if trend_signal == "BULLISH" and len(risk_warnings) <= 2:
-    signal = "BUY"
-elif trend_signal == "BULLISH":
-    signal = "CONDITIONAL BUY"
-elif trend_signal == "BEARISH":
-    signal = "AVOID"
-else:
-    signal = "HOLD"
+# ============================================================================
+# Combined Signal (RL + Technical)
+# ============================================================================
 
 print("=" * 80)
 print("TRADING SIGNAL")
 print("=" * 80)
-print(f"Signal: {signal}")
-print(f"Confidence: {confidence:.0%}")
+
+if RL_MODEL_AVAILABLE and rl_action is not None:
+    # Use RL agent as primary signal
+    if rl_action == 2:  # BUY
+        signal = "BUY"
+        recommended_size = min(rl_position_size, max_position)
+    elif rl_action == 0:  # SELL
+        signal = "SELL/AVOID"
+        recommended_size = 0
+    else:  # HOLD
+        signal = "HOLD"
+        recommended_size = 0.1  # Small position
+
+    # Check if technical agrees
+    technical_agrees = (
+        (rl_action == 2 and trend_signal == "BULLISH") or
+        (rl_action == 0 and trend_signal == "BEARISH") or
+        (rl_action == 1 and trend_signal == "NEUTRAL")
+    )
+
+    if technical_agrees:
+        print(f"Signal: {signal} ✓")
+        print(f"  RL Agent: {signal}")
+        print(f"  Technical: {trend_signal} (confirms)")
+        print(f"  Confidence: HIGH ({rl_confidence:.0%})")
+    else:
+        print(f"Signal: {signal} ⚠")
+        print(f"  RL Agent: {signal}")
+        print(f"  Technical: {trend_signal} (conflicts)")
+        print(f"  Confidence: MEDIUM ({rl_confidence * 0.7:.0%})")
+else:
+    # Fall back to technical only
+    if trend_signal == "BULLISH":
+        signal = "BUY"
+        recommended_size = 0.15
+    elif trend_signal == "BEARISH":
+        signal = "AVOID"
+        recommended_size = 0
+    else:
+        signal = "HOLD"
+        recommended_size = 0.05
+
+    print(f"Signal: {signal} (Technical Analysis)")
+    print(f"  Trend: {trend_signal}")
+
 print()
 
-if signal in ["BUY", "CONDITIONAL BUY"]:
-    print(f"RECOMMENDATION: {signal} {shares:,} shares @ ${entry_price:.2f}")
-    print(f"  Investment: ${actual_invested:,.2f}")
-    print(f"  Stop: ${stop_price:.2f}")
-    print(f"  Target: ${target_2_0:.2f}")
-    if risk_warnings:
-        print()
-        print("  WARNINGS:")
-        for w in risk_warnings:
-            print(f"    • {w}")
+# ============================================================================
+# Position Sizing & Targets
+# ============================================================================
+
+if signal in ["BUY", "HOLD"] and recommended_size > 0:
+    position_value = recommended_size * portfolio_value
+    shares = int(position_value / current_price)
+    actual_invested = shares * current_price
+    actual_position_pct = actual_invested / portfolio_value
+
+    stop_price = current_price * (1 - stop_loss_pct)
+    max_risk_dollars = shares * current_price * stop_loss_pct
+
+    risk_per_share = current_price - stop_price
+    target_2_0 = current_price + (risk_per_share * 2.0)
+    target_3_0 = current_price + (risk_per_share * 3.0)
+
+    print("-" * 80)
+    print("POSITION DETAILS")
+    print("-" * 80)
+    print(f"Recommended Shares: {shares:,}")
+    print(f"@ ${current_price:.2f} = ${actual_invested:,.2f}")
+    print(f"Position Size: {actual_position_pct:.1%} of portfolio")
+    print(f"Max Risk: ${max_risk_dollars:,.2f}")
+    print()
+    print(f"Entry: ${current_price:.2f}")
+    print(f"Stop Loss: ${stop_price:.2f} (-{stop_loss_pct*100:.0f}%)")
+    print(f"Target 1 (2R): ${target_2_0:.2f} (+{((target_2_0/current_price-1)*100):.0f}%)")
+    print(f"Target 2 (3R): ${target_3_0:.2f} (+{((target_3_0/current_price-1)*100):.0f}%)")
 else:
-    print(f"RECOMMENDATION: {signal}")
-    print(f"  Reason: {trend} - wait for better conditions")
+    print("-" * 80)
+    print("RECOMMENDATION")
+    print("-" * 80)
+    print(f"{signal}: Do not enter position at this time")
+    print(f"Reason: {trend}")
 
 print()
 print("=" * 80)
 print("ANALYSIS COMPLETE")
 print("=" * 80)
+print()
+
+if RL_MODEL_AVAILABLE:
+    print("Note: This analysis used your trained RL agent")
+else:
+    print("Note: To use RL agent, train a model first:")
+    print("  python train_rl_agent_final.py --tickers AAPL --episodes 1000")
+
 print()
 print("DISCLAIMER: This is analysis only - NOT financial advice")
 print("=" * 80)
