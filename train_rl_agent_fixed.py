@@ -45,11 +45,28 @@ from torch.utils.tensorboard import SummaryWriter
 print("  ✓ tensorboard", flush=True)
 
 # Add automoonbot to path
-sys.path.insert(0, str(Path(__file__).parent))
+repo_root = Path(__file__).parent
+sys.path.insert(0, str(repo_root))
 
-print("  Loading AutoMoonBot modules...", flush=True)
-from automoonbot.moonpy.model.simple_actor_critic import SimpleActor, SimpleCritic, PPOBuffer
-print("  ✓ AutoMoonBot modules", flush=True)
+print("  Loading AutoMoonBot modules (bypassing __init__.py)...", flush=True)
+
+# Import directly from file to avoid moonrs dependency in __init__.py
+import importlib.util
+
+module_path = repo_root / "automoonbot" / "moonpy" / "model" / "simple_actor_critic.py"
+if not module_path.exists():
+    print(f"  ✗ ERROR: Module not found at {module_path}", flush=True)
+    sys.exit(1)
+
+spec = importlib.util.spec_from_file_location("simple_actor_critic", module_path)
+simple_actor_critic = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(simple_actor_critic)
+
+SimpleActor = simple_actor_critic.SimpleActor
+SimpleCritic = simple_actor_critic.SimpleCritic
+PPOBuffer = simple_actor_critic.PPOBuffer
+
+print("  ✓ AutoMoonBot modules (direct import - avoids moonrs dependency)", flush=True)
 
 print("✓ All libraries loaded successfully!\n", flush=True)
 
