@@ -1,5 +1,5 @@
 import numpy as np
-from enum import Enum
+from enum import IntEnum
 from typing import List, Dict
 
 
@@ -12,7 +12,7 @@ class Portfolio:
     All float ops use `numpy` for the same reason.
     """
 
-    class ColAttr(Enum):
+    class ColAttr(IntEnum):
         Value = 0
         LogQuote = 1
         LagQuote = 2
@@ -22,7 +22,7 @@ class Portfolio:
         fiat: str,
         tradables: List[str],
     ) -> None:
-        self.index_map = {t: i for t, i in enumerate(tradables)}
+        self.index_map = {i: t for t, i in enumerate(tradables)}
         self.fiat = self.index_map[fiat]
         self._portfolio = self._reset_portfolio(self.fiat, len(tradables))
 
@@ -56,7 +56,6 @@ class Portfolio:
             self.__class__.ColAttr.LagQuote,
         ] = self._portfolio[:, self.__class__.ColAttr.LogQuote]
 
-    @property
     def U(
         self,
         diag: bool = False,
@@ -81,7 +80,9 @@ class Portfolio:
         self,
         quotes: Dict[str, float],
     ) -> None:
-        keys = list(quotes.keys())
+        keys = [k for k in quotes.keys() if k in self.index_map]
+        if not keys:
+            return
         index = [self.index_map[key] for key in keys]
         value = [np.log(quotes[key]) for key in keys]
         self._reset_lag()

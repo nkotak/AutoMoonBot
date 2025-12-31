@@ -104,25 +104,22 @@ class TestRewardCalculator:
         assert comp_low['diversification'] > comp_high['diversification']
 
 
+@pytest.fixture
+def simple_price_data():
+    """Create simple price data for testing."""
+    # 20 timesteps, 3 symbols
+    data = {}
+    for i in range(20):
+        data[i] = {
+            "AAPL": 100.0 + i,
+            "GOOGL": 1000.0 + i * 5,
+            "MSFT": 200.0 + i * 2,
+        }
+    return data
+
+
 class TestTradingEnvironment:
     """Comprehensive tests for TradingEnvironment."""
-
-    @pytest.fixture
-    def simple_price_data(self):
-        """Create simple price data for testing."""
-        # 10 timesteps, 3 symbols
-        return {
-            0: {"AAPL": 100.0, "GOOGL": 1000.0, "MSFT": 200.0},
-            1: {"AAPL": 101.0, "GOOGL": 1010.0, "MSFT": 202.0},
-            2: {"AAPL": 102.0, "GOOGL": 1020.0, "MSFT": 204.0},
-            3: {"AAPL": 101.5, "GOOGL": 1015.0, "MSFT": 203.0},
-            4: {"AAPL": 103.0, "GOOGL": 1025.0, "MSFT": 205.0},
-            5: {"AAPL": 104.0, "GOOGL": 1030.0, "MSFT": 206.0},
-            6: {"AAPL": 103.5, "GOOGL": 1028.0, "MSFT": 205.5},
-            7: {"AAPL": 105.0, "GOOGL": 1035.0, "MSFT": 207.0},
-            8: {"AAPL": 106.0, "GOOGL": 1040.0, "MSFT": 208.0},
-            9: {"AAPL": 107.0, "GOOGL": 1045.0, "MSFT": 209.0},
-        }
 
     @pytest.fixture
     def basic_env(self, simple_price_data):

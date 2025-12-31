@@ -596,8 +596,33 @@ def main():
             episode_steps += 1
             state = next_state
 
+            # Perform PPO update when buffer is full
+            if buffer.ptr == args.buffer_size:
+                # Bootstrap value if not done
+                last_val = 0.0
+                if not done:
+                    with torch.no_grad():
+                        next_val_tensor = torch.FloatTensor(next_state).unsqueeze(0).to(device)
+                        last_val = critic(next_val_tensor).item()
+                
+                buffer.finish_path(last_val)
+                
+                losses = ppo_update(
+                    actor, critic, optimizer, buffer,
+                    batch_size=args.batch_size,
+                    n_epochs=args.ppo_epochs,
+                    device=device
+                )
+
+                # Log training metrics
+                writer.add_scalar('train/policy_loss', losses['policy_loss'], episode)
+                writer.add_scalar('train/value_loss', losses['value_loss'], episode)
+                writer.add_scalar('train/entropy', losses['entropy'], episode)
+
             if done:
-                buffer.finish_path(0.0)
+                # Only finish path if buffer has data (might have just been reset)
+                if buffer.ptr > 0:
+                    buffer.finish_path(0.0)
                 break
 
         # Log episode metrics
@@ -605,20 +630,6 @@ def main():
         writer.add_scalar('episode/portfolio_value', info['portfolio_value'], episode)
         writer.add_scalar('episode/return', info['return'], episode)
         writer.add_scalar('episode/steps', episode_steps, episode)
-
-        # Perform PPO update when buffer is full
-        if buffer.ptr == args.buffer_size:
-            losses = ppo_update(
-                actor, critic, optimizer, buffer,
-                batch_size=args.batch_size,
-                n_epochs=args.ppo_epochs,
-                device=device
-            )
-
-            # Log training metrics
-            writer.add_scalar('train/policy_loss', losses['policy_loss'], episode)
-            writer.add_scalar('train/value_loss', losses['value_loss'], episode)
-            writer.add_scalar('train/entropy', losses['entropy'], episode)
 
         # Print progress
         if episode % 10 == 0 or episode == start_episode:
